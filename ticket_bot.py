@@ -186,9 +186,96 @@ async def create_ticket_channel(interaction: discord.Interaction, category: str,
         embed.add_field(name=q, value=a, inline=False)
 
     await channel.send(embed=embed, view=TicketControlView())
+    await channel.send(
+        "🤖 **Ticket Assistant Active**\n"
+        "Your ticket is currently unclaimed. I can help you refine your request and gather more details while staff claims the ticket."
+    )
     await interaction.response.send_message(
         f"✅ Your ticket has been created: {channel.mention}", ephemeral=True
     )
+
+
+class AnnouncementChannelSelect(discord.ui.Select):
+    def __init__(self, announcement: str, author_id: int, channels):
+        options = []
+        for channel in channels[:25]:
+            options.append(
+                discord.SelectOption(
+                    label=channel.name,
+                    value=str(channel.id),
+                    description=f"#{channel.name}"[:100],
+                )
+            )
+        super().__init__(
+            placeholder="Select a channel to post the announcement",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id="announcement_channel_select",
+        )
+        self.announcement = announcement
+        self.author_id = author_id
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message(
+                "❌ Only the user who started the announcement can choose the channel.",
+                ephemeral=True,
+            )
+
+        channel_id = int(self.values[0])
+        channel = interaction.guild.get_channel(channel_id)
+        if not channel:
+            return await interaction.response.send_message(
+                "❌ Could not find the selected channel.", ephemeral=True
+            )
+
+        embed = discord.Embed(
+            title="📢 Announcement",
+            description=self.announcement,
+            color=discord.Color.gold(),
+            timestamp=datetime.datetime.utcnow(),
+        )
+        embed.set_footer(text=f"Posted by {interaction.user}")
+        await channel.send(embed=embed)
+        await interaction.response.edit_message(
+            content=f"✅ Announcement sent to {channel.mention}.", embed=None, view=None
+        )
+        self.view.stop()
+
+
+class AnnouncementSelectView(discord.ui.View):
+    def __init__(self, announcement: str, author_id: int, channels):
+        super().__init__(timeout=120)
+        self.add_item(AnnouncementChannelSelect(announcement, author_id, channels))
+
+
+class AnnouncementModal(discord.ui.Modal, title="Create Announcement"):
+    announcement = discord.ui.TextInput(
+        label="Announcement text",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=2000,
+        placeholder="Write the announcement message here",
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        channels = [
+            c for c in interaction.guild.text_channels
+            if c.permissions_for(interaction.guild.me).send_messages
+        ]
+        if not channels:
+            return await interaction.response.send_message(
+                "❌ I couldn't find any channels to post announcements in.",
+                ephemeral=True,
+            )
+
+        announcement = self.announcement.value
+        await interaction.response.send_message(
+            "Select the channel you want to post the announcement in:",
+            view=AnnouncementSelectView(announcement, interaction.user.id, channels),
+            ephemeral=True,
+        )
 
 
 # ═══════════════════════════════════════════
@@ -374,6 +461,12 @@ async def close_ticket(interaction: discord.Interaction, reason: str = None):
 #  SLASH COMMANDS
 # ═══════════════════════════════════════════
 
+@bot.tree.command(name="announce", description="Create an announcement and pick the channel to post it in")
+@app_commands.default_permissions(manage_guild=True)
+async def announce(interaction: discord.Interaction):
+    await interaction.response.send_modal(AnnouncementModal())
+
+
 @bot.tree.command(name="ticket_setup", description="Set up the ticket panel in this channel")
 @app_commands.default_permissions(manage_channels=True)
 async def ticket_setup(interaction: discord.Interaction):
@@ -462,6 +555,62 @@ async def ticket_stats(interaction: discord.Interaction):
         cat_text = "\n".join(f"• {k}: {v}" for k, v in by_category.items())
         embed.add_field(name="By Category", value=cat_text, inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+def generate_ticket_assistant_response(message: discord.Message, data: dict):
+    content = message.content.strip()
+    if not content and not message.attachments:
+        return None
+
+    lower = content.lower()
+    category = data["category"]
+    if any(keyword in lower for keyword in ["status", "claim", "how long", "waiting", "when"]):
+        return (
+            "🤖 **Ticket Assistant:** This ticket is currently unclaimed. Staff should claim it soon. "
+            "While you wait, please add any additional details or evidence you have."
+        )
+
+    if any(keyword in lower for keyword in ["thanks", "thank", "ty", "appreciate"]):
+        return (
+            "🤖 **Ticket Assistant:** You're welcome! If you'd like, I can help you summarize your issue "
+            "for the staff member who claims this ticket."
+        )
+
+    if any(keyword in lower for keyword in ["report", "player", "rule", "cheat", "bug", "error", "issue", "problem", "help"]):
+        if category == "Report Player":
+            guidance = "Include the player name, the rule they broke, and any evidence you have."
+        elif category == "Administrator":
+            guidance = "Include your in-game name, the admin issue, and any relevant evidence or context."
+        elif category == "In-Game Appeals":
+            guidance = (
+                "Include your in-game name, the punishment you received, and why you believe it should be lifted."
+            )
+        elif category == "Support":
+            guidance = (
+                "Include your in-game name, the exact issue, and any troubleshooting steps you've already tried."
+            )
+        else:
+            guidance = "Describe your issue clearly and add any relevant details."
+        return f"🤖 **Ticket Assistant:** {guidance} I will pass this information to staff when someone claims the ticket."
+
+    return (
+        "🤖 **Ticket Assistant:** I am here while your ticket is unclaimed. "
+        "Please describe your issue clearly and include any relevant evidence or context so staff can help faster."
+    )
+
+
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot or not message.guild:
+        return
+
+    data = tickets.get(message.channel.id)
+    if data and data["claimer"] is None and message.author.id == data["opener"]:
+        response = generate_ticket_assistant_response(message, data)
+        if response:
+            await message.channel.send(response)
+
+    await bot.process_commands(message)
 
 
 # ═══════════════════════════════════════════

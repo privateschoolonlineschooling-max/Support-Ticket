@@ -9,6 +9,8 @@ A feature-rich Discord ticket bot with categories, question modals, claim system
 - **Private Channels**: Tickets are created as private channels visible only to the opener and staff
 - **Claim System**: Staff can claim tickets (opener cannot claim their own)
 - **Close Protection**: Ticket openers cannot close their own tickets
+- **Announcement System**: Write an announcement and choose a channel to publish it in
+- **Ticket Assistant**: A chatbot helper is active inside unclaimed tickets to guide users
 - **Closure Requests**: Staff can request closure with Accept/Deny buttons
 - **Transcripts**: Generates transcripts on ticket close
 
@@ -22,6 +24,7 @@ A feature-rich Discord ticket bot with categories, question modals, claim system
 | `/remove_user` | Remove a user from the current ticket | Manage Channels |
 | `/rename_ticket` | Rename the current ticket channel | Manage Channels |
 | `/ticket_stats` | View open ticket statistics | Manage Channels |
+| `/announce` | Create an announcement and choose a channel to post it | Manage Server |
 
 ## Setup
 
