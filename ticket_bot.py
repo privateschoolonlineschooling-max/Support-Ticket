@@ -25,6 +25,31 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 tickets = {}
 
 
+def is_staff_member(member: discord.Member) -> bool:
+    return member.guild_permissions.manage_channels if isinstance(member, discord.Member) else False
+
+
+def get_ticket_data(channel: discord.TextChannel):
+    data = tickets.get(channel.id)
+    if data:
+        return data
+    if isinstance(channel, discord.TextChannel) and channel.name.startswith("ticket-"):
+        data = {
+            "opener": None,
+            "claimer": None,
+            "category": "Unknown",
+            "answers": {},
+            "created_at": datetime.datetime.utcnow().isoformat(),
+            "follow_up_questions": [],
+            "follow_up_index": 0,
+            "follow_up_answers": [],
+            "logged": True,
+        }
+        tickets[channel.id] = data
+        return data
+    return None
+
+
 # ─── Colors ───
 COLORS = {
     "Administrator": discord.Color.red(),
@@ -374,34 +399,34 @@ class TicketControlView(discord.ui.View):
 
     @discord.ui.button(label="🔒 Close", style=discord.ButtonStyle.danger, custom_id="ticket_close")
     async def close_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        data = tickets.get(interaction.channel.id)
+        data = get_ticket_data(interaction.channel)
         if not data:
-            return await interaction.response.send_message("❌ Ticket data not found.", ephemeral=True)
-        if interaction.user.id == data["opener"]:
+            return await interaction.response.send_message("❌ This is not a ticket channel.", ephemeral=True)
+        if data.get("opener") and interaction.user.id == data["opener"]:
             return await interaction.response.send_message("❌ You cannot close your own ticket.", ephemeral=True)
-        if not interaction.user.guild_permissions.manage_channels:
+        if not is_staff_member(interaction.user):
             return await interaction.response.send_message("❌ You don't have permission.", ephemeral=True)
         await close_ticket(interaction, reason=None)
 
     @discord.ui.button(label="🔒 Close With Reason", style=discord.ButtonStyle.danger, custom_id="ticket_close_reason")
     async def close_reason_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        data = tickets.get(interaction.channel.id)
+        data = get_ticket_data(interaction.channel)
         if not data:
-            return await interaction.response.send_message("❌ Ticket data not found.", ephemeral=True)
-        if interaction.user.id == data["opener"]:
+            return await interaction.response.send_message("❌ This is not a ticket channel.", ephemeral=True)
+        if data.get("opener") and interaction.user.id == data["opener"]:
             return await interaction.response.send_message("❌ You cannot close your own ticket.", ephemeral=True)
-        if not interaction.user.guild_permissions.manage_channels:
+        if not is_staff_member(interaction.user):
             return await interaction.response.send_message("❌ You don't have permission.", ephemeral=True)
         await interaction.response.send_modal(CloseReasonModal())
 
     @discord.ui.button(label="🙋 Claim", style=discord.ButtonStyle.success, custom_id="ticket_claim")
     async def claim_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        data = tickets.get(interaction.channel.id)
+        data = get_ticket_data(interaction.channel)
         if not data:
-            return await interaction.response.send_message("❌ Ticket data not found.", ephemeral=True)
-        if interaction.user.id == data["opener"]:
+            return await interaction.response.send_message("❌ This is not a ticket channel.", ephemeral=True)
+        if data.get("opener") and interaction.user.id == data["opener"]:
             return await interaction.response.send_message("❌ You cannot claim your own ticket.", ephemeral=True)
-        if not interaction.user.guild_permissions.manage_channels:
+        if not is_staff_member(interaction.user):
             return await interaction.response.send_message("❌ You don't have permission.", ephemeral=True)
         if data["claimer"]:
             return await interaction.response.send_message(f"❌ Already claimed by <@{data['claimer']}>.", ephemeral=True)
@@ -426,28 +451,39 @@ class CloseReasonModal(discord.ui.Modal, title="Close Ticket"):
 # ═══════════════════════════════════════════
 
 class ClosureRequestView(discord.ui.View):
-    def __init__(self, requester_id: int):
+    def __init__(self, requester_id: int, opener_id: int | None):
         super().__init__(timeout=None)
         self.requester_id = requester_id
+        self.opener_id = opener_id
 
     @discord.ui.button(label="✅ Accept", style=discord.ButtonStyle.success, custom_id="closure_accept")
     async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
         data = tickets.get(interaction.channel.id)
-        if not data:
-            return
-        if interaction.user.id == data["opener"]:
-            return await interaction.response.send_message("❌ You cannot accept closure of your own ticket.", ephemeral=True)
-        if not interaction.user.guild_permissions.manage_channels:
-            return await interaction.response.send_message("❌ No permission.", ephemeral=True)
+        if not data or self.opener_id is None:
+            return await interaction.response.send_message(
+                "❌ Cannot process this closure request because the ticket opener is unknown.",
+                ephemeral=True,
+            )
+        if interaction.user.id != self.opener_id:
+            return await interaction.response.send_message(
+                "❌ Only the ticket opener can accept or deny this closure request.",
+                ephemeral=True,
+            )
         await close_ticket(interaction, reason="Closure request accepted")
 
     @discord.ui.button(label="❌ Deny", style=discord.ButtonStyle.danger, custom_id="closure_deny")
     async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
         data = tickets.get(interaction.channel.id)
-        if not data:
-            return
-        if not interaction.user.guild_permissions.manage_channels:
-            return await interaction.response.send_message("❌ No permission.", ephemeral=True)
+        if not data or self.opener_id is None:
+            return await interaction.response.send_message(
+                "❌ Cannot process this closure request because the ticket opener is unknown.",
+                ephemeral=True,
+            )
+        if interaction.user.id != self.opener_id:
+            return await interaction.response.send_message(
+                "❌ Only the ticket opener can accept or deny this closure request.",
+                ephemeral=True,
+            )
         embed = discord.Embed(
             title="❌ Closure Request Denied",
             description=f"The closure request has been denied by {interaction.user.mention}.",
@@ -482,12 +518,13 @@ async def close_ticket(interaction: discord.Interaction, reason: str = None):
         embed.add_field(name="Reason", value=reason, inline=False)
     if data:
         embed.add_field(name="Category", value=data["category"], inline=True)
-        embed.add_field(name="Opened by", value=f"<@{data['opener']}>", inline=True)
+        if data.get("opener") is not None:
+            embed.add_field(name="Opened by", value=f"<@{data['opener']}>", inline=True)
         if data["claimer"]:
             embed.add_field(name="Claimed by", value=f"<@{data['claimer']}>", inline=True)
 
     # Send DM to ticket opener with full details
-    if data:
+    if data and data.get("opener") is not None:
         opener = interaction.guild.get_member(data["opener"])
         if opener:
             dm_embed = discord.Embed(
@@ -503,7 +540,8 @@ async def close_ticket(interaction: discord.Interaction, reason: str = None):
                 dm_embed.add_field(name="Handled By", value=f"<@{data['claimer']}>", inline=True)
             
             # Add original answers
-            dm_embed.add_field(name="Original Details", value="\n".join(f"**{q}:** {a}" for q, a in data["answers"].items()), inline=False)
+            if data["answers"]:
+                dm_embed.add_field(name="Original Details", value="\n".join(f"**{q}:** {a}" for q, a in data["answers"].items()), inline=False)
             
             # Add transcript summary (first few messages)
             if transcript_lines:
@@ -577,15 +615,23 @@ async def closure_request(interaction: discord.Interaction):
     data = tickets.get(interaction.channel.id)
     if not data:
         return await interaction.response.send_message("❌ This is not a ticket channel.", ephemeral=True)
+    if data["opener"] is None:
+        return await interaction.response.send_message(
+            "❌ Closure requests cannot be processed because the ticket opener is unknown.",
+            ephemeral=True,
+        )
     if data["claimer"] != interaction.user.id and not interaction.user.guild_permissions.manage_channels:
         return await interaction.response.send_message("❌ Only the ticket claimer or staff can request closure.", ephemeral=True)
 
     embed = discord.Embed(
         title="🔒 Closure Request",
-        description=f"{interaction.user.mention} is requesting to close this ticket.\nDo you accept?",
+        description=(
+            f"{interaction.user.mention} is requesting to close this ticket.\n"
+            f"Only the ticket opener (<@{data['opener']}>) can accept or deny this request."
+        ),
         color=discord.Color.orange(),
     )
-    await interaction.response.send_message(embed=embed, view=ClosureRequestView(interaction.user.id))
+    await interaction.response.send_message(embed=embed, view=ClosureRequestView(interaction.user.id, data["opener"]))
 
 
 @bot.tree.command(name="add_user", description="Add a user to the current ticket")
