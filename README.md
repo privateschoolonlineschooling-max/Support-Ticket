@@ -11,7 +11,6 @@ A feature-rich Discord ticket bot with categories, question modals, claim system
 - **Close Protection**: Ticket openers cannot close their own tickets
 - **Blacklist System**: Prevent users from opening tickets and disable DM notifications
 - **Announcement System**: Write an announcement and choose a channel to publish it in
-- **Ticket Assistant**: A chatbot helper is active inside unclaimed tickets to guide users
 - **Closure Requests**: Staff can request closure with Accept/Deny buttons
 - **Transcripts**: Generates transcripts on ticket close
 

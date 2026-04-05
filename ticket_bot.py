@@ -98,9 +98,6 @@ def get_ticket_data(channel: discord.TextChannel):
             "category": category,
             "answers": {},
             "created_at": datetime.datetime.utcnow().isoformat(),
-            "follow_up_questions": [],
-            "follow_up_index": 0,
-            "follow_up_answers": [],
             "logged": True,
         }
         tickets[channel.id] = data
@@ -145,33 +142,6 @@ QUESTIONS = {
     "Other": [
         "What is your in-game name?",
         "Please describe your inquiry in detail.",
-    ],
-}
-
-FOLLOW_UP_QUESTIONS = {
-    "Administrator": [
-        "Do you have any supporting evidence, such as screenshots, logs, or ticket IDs?",
-        "Have you already tried any resolution steps? If so, what were they?",
-        "Is there any additional context staff should know before claiming this ticket?",
-    ],
-    "Report Player": [
-        "Do you have any evidence of the reported behavior?",
-        "What impact did this behavior have on you or your experience?",
-        "Is there anything else staff should know before reviewing this report?",
-    ],
-    "In-Game Appeals": [
-        "Do you have any evidence or logs related to the punishment?",
-        "Have you already appealed this elsewhere or contacted staff?",
-        "What additional details would help staff review your appeal?",
-    ],
-    "Support": [
-        "Can you provide any screenshots, error messages, or logs?",
-        "Have you tried anything already to fix the issue?",
-        "Is there any other detail that may help staff resolve this faster?",
-    ],
-    "Other": [
-        "Please provide any evidence, screenshots, or examples if available.",
-        "What would you like staff to know before they claim this ticket?",
     ],
 }
 
@@ -283,20 +253,12 @@ async def create_ticket_channel(interaction: discord.Interaction, category: str,
         ticket_name, category=category_channel, overwrites=overwrites
     )
 
-    follow_up_questions = FOLLOW_UP_QUESTIONS.get(category, [
-        "Please provide any additional details or evidence.",
-        "Is there anything else staff should know before claiming this ticket?",
-    ])
-
     tickets[channel.id] = {
         "opener": user.id,
         "claimer": None,
         "category": category,
         "answers": answers,
         "created_at": datetime.datetime.utcnow().isoformat(),
-        "follow_up_questions": follow_up_questions,
-        "follow_up_index": 0,
-        "follow_up_answers": [],
         "logged": False,
     }
     save_ticket_store()
@@ -315,17 +277,6 @@ async def create_ticket_channel(interaction: discord.Interaction, category: str,
         embed.add_field(name=q, value=a, inline=False)
 
     await channel.send(embed=embed, view=TicketControlView())
-    await channel.send(
-        "🤖 **Ticket Assistant Active**\n"
-        "Your ticket is currently unclaimed. I can help you refine your request and gather more details while staff claims the ticket."
-    )
-
-    first_follow_up = follow_up_questions[0] if follow_up_questions else None
-    if first_follow_up:
-        await channel.send(
-            f"🤖 **Ticket Assistant:** I have a few follow-up questions to complete your ticket.\n"
-            f"1/{len(follow_up_questions)} {first_follow_up}"
-        )
 
     await interaction.response.send_message(
         f"✅ Your ticket has been created: {channel.mention}", ephemeral=True
@@ -358,11 +309,6 @@ async def send_ticket_log(guild: discord.Guild, data: dict, ticket_channel: disc
     lines = []
     for q, a in data["answers"].items():
         lines.append(f"{q}: {a}")
-    follow_up = data.get("follow_up_answers", [])
-    if follow_up:
-        lines.append("\n--- Follow-Up Answers ---")
-        for q, a in follow_up:
-            lines.append(f"{q}: {a}")
 
     if lines:
         file = discord.File(
@@ -501,6 +447,13 @@ class TicketControlView(discord.ui.View):
         data["claimer"] = interaction.user.id
         save_ticket_store()
         await interaction.channel.edit(topic=f"ticket_data:{json.dumps({'opener': data['opener'], 'claimer': data['claimer'], 'category': data['category']})}")
+        
+        # Send ticket log if applicable
+        if not data.get("logged", False):
+            await send_ticket_log(interaction.guild, data, interaction.channel)
+            data["logged"] = True
+            save_ticket_store()
+        
         embed = discord.Embed(
             title="🙋 Ticket Claimed",
             description=f"This ticket has been claimed by {interaction.user.mention}",
@@ -633,12 +586,6 @@ async def close_ticket(interaction: discord.Interaction, reason: str = None):
                     value="\n".join(f"**{q}:** {a}" for q, a in data["answers"].items()),
                     inline=False,
                 )
-            if data.get("follow_up_answers"):
-                dm_embed.add_field(
-                    name="Follow-Up Answers",
-                    value="\n".join(f"**{q}:** {a}" for q, a in data["follow_up_answers"]),
-                    inline=False,
-                )
             if transcript_lines:
                 summary_lines = transcript_lines[:10]
                 if len(transcript_lines) > 10:
@@ -686,6 +633,12 @@ async def close_ticket(interaction: discord.Interaction, reason: str = None):
         await interaction.followup.send(embed=embed)
     except (discord.Forbidden, discord.HTTPException) as e:
         print(f"Failed to send close confirmation: {e}")
+
+    # Send ticket log if applicable
+    if not data.get("logged", False):
+        await send_ticket_log(interaction.guild, data, channel)
+        data["logged"] = True
+        save_ticket_store()
 
     tickets.pop(channel.id, None)
     save_ticket_store()
@@ -882,81 +835,7 @@ async def blacklist_list(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-def generate_ticket_assistant_response(message: discord.Message, data: dict):
-    content = message.content.strip()
-    if not content and not message.attachments:
-        return None
 
-    lower = content.lower()
-    category = data["category"]
-    if any(keyword in lower for keyword in ["status", "claim", "how long", "waiting", "when"]):
-        return (
-            "🤖 **Ticket Assistant:** This ticket is currently unclaimed. Staff should claim it soon. "
-            "While you wait, please add any additional details or evidence you have."
-        )
-
-    if any(keyword in lower for keyword in ["thanks", "thank", "ty", "appreciate"]):
-        return (
-            "🤖 **Ticket Assistant:** You're welcome! If you'd like, I can help you summarize your issue "
-            "for the staff member who claims this ticket."
-        )
-
-    if any(keyword in lower for keyword in ["report", "player", "rule", "cheat", "bug", "error", "issue", "problem", "help"]):
-        if category == "Report Player":
-            guidance = "Include the player name, the rule they broke, and any evidence you have."
-        elif category == "Administrator":
-            guidance = "Include your in-game name, the admin issue, and any relevant evidence or context."
-        elif category == "In-Game Appeals":
-            guidance = (
-                "Include your in-game name, the punishment you received, and why you believe it should be lifted."
-            )
-        elif category == "Support":
-            guidance = (
-                "Include your in-game name, the exact issue, and any troubleshooting steps you've already tried."
-            )
-        else:
-            guidance = "Describe your issue clearly and add any relevant details."
-        return f"🤖 **Ticket Assistant:** {guidance} I will pass this information to staff when someone claims the ticket."
-
-    return (
-        "🤖 **Ticket Assistant:** I am here while your ticket is unclaimed. "
-        "Please describe your issue clearly and include any relevant evidence or context so staff can help faster."
-    )
-
-
-@bot.event
-async def on_message(message: discord.Message):
-    if message.author.bot or not message.guild:
-        return
-
-    data = tickets.get(message.channel.id)
-    if data and data["claimer"] is None and message.author.id == data["opener"]:
-        follow_up_questions = data.get("follow_up_questions", [])
-        follow_up_index = data.get("follow_up_index", 0)
-
-        if follow_up_index < len(follow_up_questions):
-            question = follow_up_questions[follow_up_index]
-            answer = message.content.strip() or ", ".join(att.url for att in message.attachments)
-            if not answer:
-                answer = "No text provided."
-
-            data["follow_up_answers"].append((question, answer))
-            data["follow_up_index"] = follow_up_index + 1
-
-            if follow_up_index + 1 < len(follow_up_questions):
-                next_question = follow_up_questions[follow_up_index + 1]
-                await message.channel.send(
-                    f"🤖 **Ticket Assistant:** Thanks for that.\n{follow_up_index + 2}/{len(follow_up_questions)} {next_question}"
-                )
-            else:
-                await message.channel.send(
-                    "🤖 **Ticket Assistant:** Thank you, I’ve collected all follow-up details. "
-                    "I’m sending everything to the ticket log for staff review now."
-                )
-                if not data.get("logged"):
-                    await send_ticket_log(message.guild, data, message.channel)
-                    data["logged"] = True
-                save_ticket_store()
 @bot.event
 async def on_ready():
     bot.add_view(TicketSetupView())
