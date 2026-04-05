@@ -528,7 +528,7 @@ class ClosureRequestView(discord.ui.View):
 
     @discord.ui.button(label="✅ Accept", style=discord.ButtonStyle.success, custom_id="closure_accept")
     async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
-        data = tickets.get(interaction.channel.id)
+        data = get_ticket_data(interaction.channel)
         if not data or self.opener_id is None:
             return await interaction.response.send_message(
                 "❌ Cannot process this closure request because the ticket opener is unknown.",
@@ -543,7 +543,7 @@ class ClosureRequestView(discord.ui.View):
 
     @discord.ui.button(label="❌ Deny", style=discord.ButtonStyle.danger, custom_id="closure_deny")
     async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
-        data = tickets.get(interaction.channel.id)
+        data = get_ticket_data(interaction.channel)
         if not data or self.opener_id is None:
             return await interaction.response.send_message(
                 "❌ Cannot process this closure request because the ticket opener is unknown.",
