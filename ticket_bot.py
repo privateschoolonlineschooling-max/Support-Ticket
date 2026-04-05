@@ -575,9 +575,13 @@ async def close_ticket(interaction: discord.Interaction, reason: str = None):
 
     # Generate transcript
     transcript_lines = []
-    async for msg in channel.history(limit=500, oldest_first=True):
-        timestamp = msg.created_at.strftime("%Y-%m-%d %H:%M:%S")
-        transcript_lines.append(f"[{timestamp}] {msg.author}: {msg.content}")
+    try:
+        async for msg in channel.history(limit=500, oldest_first=True):
+            timestamp = msg.created_at.strftime("%Y-%m-%d %H:%M:%S")
+            transcript_lines.append(f"[{timestamp}] {msg.author}: {msg.content}")
+    except (discord.Forbidden, discord.HTTPException) as e:
+        print(f"Failed to fetch message history for transcript: {e}")
+        transcript_lines = ["[Error] Could not fetch message history"]
     transcript = "\n".join(transcript_lines)
 
     embed = discord.Embed(
@@ -650,30 +654,52 @@ async def close_ticket(interaction: discord.Interaction, reason: str = None):
                 pass
 
     # Send transcript to log channel if configured
-    if TRANSCRIPT_CHANNEL_ID:
+    if TRANSCRIPT_CHANNEL_ID and transcript_lines:
         log_channel = interaction.guild.get_channel(TRANSCRIPT_CHANNEL_ID)
         if log_channel:
-            file = discord.File(
-                fp=io.BytesIO(transcript.encode()),
-                filename=f"transcript-{channel.name}.txt",
-            )
-            await log_channel.send(embed=embed, file=file)
+            try:
+                file = discord.File(
+                    fp=io.BytesIO(transcript.encode()),
+                    filename=f"transcript-{channel.name}.txt",
+                )
+                await log_channel.send(embed=embed, file=file)
+            except (discord.Forbidden, discord.HTTPException) as e:
+                print(f"Failed to send transcript to log channel: {e}")
 
     # Send data to Kasi Vibes Studios data channel if applicable
-    if interaction.guild.id == KASI_VIBES_GUILD_ID:
+    if interaction.guild.id == KASI_VIBES_GUILD_ID and transcript_lines:
         data_channel = bot.get_channel(KASI_VIBES_DATA_CHANNEL_ID)
         if data_channel:
-            file = discord.File(
-                fp=io.BytesIO(transcript.encode()),
-                filename=f"transcript-{channel.name}.txt",
-            )
-            await data_channel.send(embed=embed, file=file)
+            try:
+                file = discord.File(
+                    fp=io.BytesIO(transcript.encode()),
+                    filename=f"transcript-{channel.name}.txt",
+                )
+                await data_channel.send(embed=embed, file=file)
+            except (discord.Forbidden, discord.HTTPException) as e:
+                print(f"Failed to send transcript to data channel: {e}")
 
-    await interaction.response.send_message(embed=embed)
+    try:
+        await interaction.response.send_message(embed=embed)
+    except discord.InteractionResponded:
+        # If already responded, send as followup
+        await interaction.followup.send(embed=embed)
+    except (discord.Forbidden, discord.HTTPException) as e:
+        print(f"Failed to send close confirmation: {e}")
+
     tickets.pop(channel.id, None)
     save_ticket_store()
-    await discord.utils.sleep_until(datetime.datetime.utcnow() + datetime.timedelta(seconds=5))
-    await channel.delete(reason=f"Ticket closed by {interaction.user}")
+    
+    try:
+        await discord.utils.sleep_until(datetime.datetime.utcnow() + datetime.timedelta(seconds=5))
+        await channel.delete(reason=f"Ticket closed by {interaction.user}")
+    except (discord.Forbidden, discord.HTTPException) as e:
+        print(f"Failed to delete ticket channel: {e}")
+        # If we can't delete the channel, at least notify that the ticket is closed
+        try:
+            await channel.send("❌ Failed to delete this channel. Please contact an administrator.")
+        except (discord.Forbidden, discord.HTTPException):
+            pass
 
 
 # ═══════════════════════════════════════════
