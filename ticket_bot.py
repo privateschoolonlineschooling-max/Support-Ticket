@@ -25,6 +25,11 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 tickets = {}
 TICKET_STORE_FILE = os.path.join(os.path.dirname(__file__), "tickets.json")
 
+# ─── Blacklist store ───
+# user_id -> { "blacklisted_by": user_id, "reason": str, "timestamp": str }
+blacklist = {}
+BLACKLIST_STORE_FILE = os.path.join(os.path.dirname(__file__), "blacklist.json")
+
 
 def save_ticket_store() -> None:
     try:
@@ -42,6 +47,26 @@ def load_ticket_store() -> None:
             data = json.load(f)
             for key, value in data.items():
                 tickets[int(key)] = value
+    except (OSError, json.JSONDecodeError):
+        pass
+
+
+def save_blacklist_store() -> None:
+    try:
+        with open(BLACKLIST_STORE_FILE, "w", encoding="utf-8") as f:
+            json.dump({str(k): v for k, v in blacklist.items()}, f, indent=2)
+    except OSError:
+        pass
+
+
+def load_blacklist_store() -> None:
+    if not os.path.exists(BLACKLIST_STORE_FILE):
+        return
+    try:
+        with open(BLACKLIST_STORE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            for key, value in data.items():
+                blacklist[int(key)] = value
     except (OSError, json.JSONDecodeError):
         pass
 
@@ -210,6 +235,13 @@ class TicketQuestionsModal(discord.ui.Modal):
 # ═══════════════════════════════════════════
 
 async def open_ticket_flow(interaction: discord.Interaction, category: str):
+    # Check if user is blacklisted
+    if interaction.user.id in blacklist:
+        await interaction.response.send_message(
+            "❌ You are blacklisted from opening tickets.", ephemeral=True
+        )
+        return
+    
     # Check if user already has an open ticket
     for ch_id, data in tickets.items():
         if data["opener"] == interaction.user.id:
@@ -562,7 +594,7 @@ async def close_ticket(interaction: discord.Interaction, reason: str = None):
             embed.add_field(name="Claimed by", value=f"<@{data['claimer']}>", inline=True)
 
     # Send DM to ticket opener with full details
-    if data and data.get("opener") is not None:
+    if data and data.get("opener") is not None and data["opener"] not in blacklist:
         opener = interaction.guild.get_member(data["opener"])
         if opener is None:
             try:
@@ -750,6 +782,78 @@ async def ticket_stats(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
+@bot.tree.command(name="blacklist", description="Blacklist a user from opening tickets and disable DM notifications")
+@app_commands.describe(user="The user to blacklist", reason="Reason for blacklisting")
+@app_commands.default_permissions(manage_channels=True)
+async def blacklist_user(interaction: discord.Interaction, user: discord.Member, reason: str = "No reason provided"):
+    if user.id in blacklist:
+        await interaction.response.send_message(f"❌ {user.mention} is already blacklisted.", ephemeral=True)
+        return
+    
+    blacklist[user.id] = {
+        "blacklisted_by": interaction.user.id,
+        "reason": reason,
+        "timestamp": datetime.datetime.utcnow().isoformat()
+    }
+    save_blacklist_store()
+    
+    embed = discord.Embed(
+        title="🚫 User Blacklisted",
+        description=f"{user.mention} has been blacklisted from opening tickets.",
+        color=discord.Color.red(),
+        timestamp=datetime.datetime.utcnow()
+    )
+    embed.add_field(name="Reason", value=reason, inline=False)
+    embed.add_field(name="Blacklisted By", value=interaction.user.mention, inline=True)
+    embed.set_footer(text=f"User ID: {user.id}")
+    
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="unblacklist", description="Remove a user from the blacklist")
+@app_commands.describe(user="The user to unblacklist")
+@app_commands.default_permissions(manage_channels=True)
+async def unblacklist_user(interaction: discord.Interaction, user: discord.Member):
+    if user.id not in blacklist:
+        await interaction.response.send_message(f"❌ {user.mention} is not blacklisted.", ephemeral=True)
+        return
+    
+    del blacklist[user.id]
+    save_blacklist_store()
+    
+    embed = discord.Embed(
+        title="✅ User Unblacklisted",
+        description=f"{user.mention} has been removed from the blacklist.",
+        color=discord.Color.green(),
+        timestamp=datetime.datetime.utcnow()
+    )
+    embed.add_field(name="Unblacklisted By", value=interaction.user.mention, inline=True)
+    embed.set_footer(text=f"User ID: {user.id}")
+    
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="blacklist_list", description="View the blacklist")
+@app_commands.default_permissions(manage_channels=True)
+async def blacklist_list(interaction: discord.Interaction):
+    if not blacklist:
+        await interaction.response.send_message("📋 The blacklist is empty.", ephemeral=True)
+        return
+    
+    embed = discord.Embed(title="🚫 Blacklist", color=discord.Color.red())
+    
+    for user_id, data in blacklist.items():
+        blacklisted_by = f"<@{data['blacklisted_by']}>"
+        timestamp = data['timestamp'][:10]  # Just the date
+        embed.add_field(
+            name=f"User ID: {user_id}",
+            value=f"**Reason:** {data['reason']}\n**By:** {blacklisted_by}\n**Date:** {timestamp}",
+            inline=False
+        )
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 def generate_ticket_assistant_response(message: discord.Message, data: dict):
     content = message.content.strip()
     if not content and not message.attachments:
@@ -843,6 +947,7 @@ async def on_ready():
 
 if __name__ == "__main__":
     load_ticket_store()
+    load_blacklist_store()
     if not TOKEN:
         print("❌ Error: DISCORD_BOT_TOKEN environment variable not set!")
         print("Set it with: export DISCORD_BOT_TOKEN=your_token_here")
