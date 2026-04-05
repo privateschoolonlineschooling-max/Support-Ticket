@@ -308,6 +308,37 @@ async def close_ticket(interaction: discord.Interaction, reason: str = None):
         if data["claimer"]:
             embed.add_field(name="Claimed by", value=f"<@{data['claimer']}>", inline=True)
 
+    # Send DM to ticket opener with full details
+    if data:
+        opener = interaction.guild.get_member(data["opener"])
+        if opener:
+            dm_embed = discord.Embed(
+                title=f"🔒 Your {data['category']} Ticket Has Been Closed",
+                description=f"Your ticket has been closed by {interaction.user.mention} in {interaction.guild.name}.",
+                color=discord.Color.red(),
+                timestamp=datetime.datetime.utcnow(),
+            )
+            if reason:
+                dm_embed.add_field(name="Reason for Closure", value=reason, inline=False)
+            dm_embed.add_field(name="Closed At", value=datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"), inline=True)
+            if data["claimer"]:
+                dm_embed.add_field(name="Handled By", value=f"<@{data['claimer']}>", inline=True)
+            
+            # Add original answers
+            dm_embed.add_field(name="Original Details", value="\n".join(f"**{q}:** {a}" for q, a in data["answers"].items()), inline=False)
+            
+            # Add transcript summary (first few messages)
+            if transcript_lines:
+                summary_lines = transcript_lines[:10]  # First 10 messages
+                if len(transcript_lines) > 10:
+                    summary_lines.append("... (truncated)")
+                dm_embed.add_field(name="Conversation Summary", value="```\n" + "\n".join(summary_lines) + "\n```", inline=False)
+            
+            try:
+                await opener.send(embed=dm_embed)
+            except discord.Forbidden:
+                pass  # User has DMs disabled, silently ignore
+
     # Send transcript to log channel if configured
     if TRANSCRIPT_CHANNEL_ID:
         log_channel = interaction.guild.get_channel(TRANSCRIPT_CHANNEL_ID)
