@@ -23,6 +23,27 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # ─── In-memory ticket store ───
 # ticket_channel_id -> { "opener": user_id, "claimer": user_id|None, "category": str, "answers": dict }
 tickets = {}
+TICKET_STORE_FILE = os.path.join(os.path.dirname(__file__), "tickets.json")
+
+
+def save_ticket_store() -> None:
+    try:
+        with open(TICKET_STORE_FILE, "w", encoding="utf-8") as f:
+            json.dump({str(k): v for k, v in tickets.items()}, f, indent=2)
+    except OSError:
+        pass
+
+
+def load_ticket_store() -> None:
+    if not os.path.exists(TICKET_STORE_FILE):
+        return
+    try:
+        with open(TICKET_STORE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            for key, value in data.items():
+                tickets[int(key)] = value
+    except (OSError, json.JSONDecodeError):
+        pass
 
 
 def is_staff_member(member: discord.Member) -> bool:
@@ -34,10 +55,22 @@ def get_ticket_data(channel: discord.TextChannel):
     if data:
         return data
     if isinstance(channel, discord.TextChannel) and channel.name.startswith("ticket-"):
+        opener = None
+        claimer = None
+        category = "Unknown"
+        if channel.topic and channel.topic.startswith("ticket_data:"):
+            try:
+                payload = json.loads(channel.topic[len("ticket_data:"):])
+                opener = payload.get("opener")
+                claimer = payload.get("claimer")
+                category = payload.get("category", "Unknown")
+            except json.JSONDecodeError:
+                pass
+
         data = {
-            "opener": None,
-            "claimer": None,
-            "category": "Unknown",
+            "opener": opener,
+            "claimer": claimer,
+            "category": category,
             "answers": {},
             "created_at": datetime.datetime.utcnow().isoformat(),
             "follow_up_questions": [],
@@ -46,6 +79,7 @@ def get_ticket_data(channel: discord.TextChannel):
             "logged": True,
         }
         tickets[channel.id] = data
+        save_ticket_store()
         return data
     return None
 
@@ -233,6 +267,8 @@ async def create_ticket_channel(interaction: discord.Interaction, category: str,
         "follow_up_answers": [],
         "logged": False,
     }
+    save_ticket_store()
+    await channel.edit(topic=f"ticket_data:{json.dumps({'opener': user.id, 'claimer': None, 'category': category})}")
 
     # Build answers embed
     color = COLORS.get(category, discord.Color.blurple())
@@ -431,6 +467,8 @@ class TicketControlView(discord.ui.View):
         if data["claimer"]:
             return await interaction.response.send_message(f"❌ Already claimed by <@{data['claimer']}>.", ephemeral=True)
         data["claimer"] = interaction.user.id
+        save_ticket_store()
+        await interaction.channel.edit(topic=f"ticket_data:{json.dumps({'opener': data['opener'], 'claimer': data['claimer'], 'category': data['category']})}")
         embed = discord.Embed(
             title="🙋 Ticket Claimed",
             description=f"This ticket has been claimed by {interaction.user.mention}",
@@ -526,34 +564,56 @@ async def close_ticket(interaction: discord.Interaction, reason: str = None):
     # Send DM to ticket opener with full details
     if data and data.get("opener") is not None:
         opener = interaction.guild.get_member(data["opener"])
+        if opener is None:
+            try:
+                opener = await bot.fetch_user(data["opener"])
+            except discord.NotFound:
+                opener = None
+
         if opener:
             dm_embed = discord.Embed(
                 title=f"🔒 Your {data['category']} Ticket Has Been Closed",
-                description=f"Your ticket has been closed by {interaction.user.mention} in {interaction.guild.name}.",
+                description=(
+                    f"Your ticket in {interaction.guild.name} has been closed by {interaction.user.mention}."
+                ),
                 color=discord.Color.red(),
                 timestamp=datetime.datetime.utcnow(),
             )
+            dm_embed.add_field(name="Ticket Channel", value=channel.name, inline=True)
+            dm_embed.add_field(name="Category", value=data["category"], inline=True)
+            dm_embed.add_field(name="Closed By", value=interaction.user.mention, inline=True)
+            if data["claimer"]:
+                dm_embed.add_field(name="Claimed By", value=f"<@{data['claimer']}>", inline=True)
+            else:
+                dm_embed.add_field(name="Claimed By", value="Not claimed", inline=True)
             if reason:
                 dm_embed.add_field(name="Reason for Closure", value=reason, inline=False)
-            dm_embed.add_field(name="Closed At", value=datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"), inline=True)
-            if data["claimer"]:
-                dm_embed.add_field(name="Handled By", value=f"<@{data['claimer']}>", inline=True)
-            
-            # Add original answers
+            dm_embed.add_field(name="Closed At", value=datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"), inline=False)
             if data["answers"]:
-                dm_embed.add_field(name="Original Details", value="\n".join(f"**{q}:** {a}" for q, a in data["answers"].items()), inline=False)
-            
-            # Add transcript summary (first few messages)
+                dm_embed.add_field(
+                    name="Original Details",
+                    value="\n".join(f"**{q}:** {a}" for q, a in data["answers"].items()),
+                    inline=False,
+                )
+            if data.get("follow_up_answers"):
+                dm_embed.add_field(
+                    name="Follow-Up Answers",
+                    value="\n".join(f"**{q}:** {a}" for q, a in data["follow_up_answers"]),
+                    inline=False,
+                )
             if transcript_lines:
-                summary_lines = transcript_lines[:10]  # First 10 messages
+                summary_lines = transcript_lines[:10]
                 if len(transcript_lines) > 10:
                     summary_lines.append("... (truncated)")
-                dm_embed.add_field(name="Conversation Summary", value="```\n" + "\n".join(summary_lines) + "\n```", inline=False)
-            
+                dm_embed.add_field(
+                    name="Conversation Summary",
+                    value="```\n" + "\n".join(summary_lines) + "\n```",
+                    inline=False,
+                )
             try:
                 await opener.send(embed=dm_embed)
             except discord.Forbidden:
-                pass  # User has DMs disabled, silently ignore
+                pass
 
     # Send transcript to log channel if configured
     if TRANSCRIPT_CHANNEL_ID:
@@ -577,6 +637,7 @@ async def close_ticket(interaction: discord.Interaction, reason: str = None):
 
     await interaction.response.send_message(embed=embed)
     tickets.pop(channel.id, None)
+    save_ticket_store()
     await discord.utils.sleep_until(datetime.datetime.utcnow() + datetime.timedelta(seconds=5))
     await channel.delete(reason=f"Ticket closed by {interaction.user}")
 
@@ -763,19 +824,7 @@ async def on_message(message: discord.Message):
                 if not data.get("logged"):
                     await send_ticket_log(message.guild, data, message.channel)
                     data["logged"] = True
-            return
-
-        response = generate_ticket_assistant_response(message, data)
-        if response:
-            await message.channel.send(response)
-
-    await bot.process_commands(message)
-
-
-# ═══════════════════════════════════════════
-#  BOT EVENTS
-# ═══════════════════════════════════════════
-
+                save_ticket_store()
 @bot.event
 async def on_ready():
     bot.add_view(TicketSetupView())
@@ -793,6 +842,7 @@ async def on_ready():
 # ═══════════════════════════════════════════
 
 if __name__ == "__main__":
+    load_ticket_store()
     if not TOKEN:
         print("❌ Error: DISCORD_BOT_TOKEN environment variable not set!")
         print("Set it with: export DISCORD_BOT_TOKEN=your_token_here")
