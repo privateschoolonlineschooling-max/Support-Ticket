@@ -526,17 +526,7 @@ async def close_ticket(interaction: discord.Interaction, reason: str = None):
     if data is None:
         data = get_ticket_data(channel)
 
-    # Generate transcript
-    transcript_lines = []
-    try:
-        async for msg in channel.history(limit=500, oldest_first=True):
-            timestamp = msg.created_at.strftime("%Y-%m-%d %H:%M:%S")
-            transcript_lines.append(f"[{timestamp}] {msg.author}: {msg.content}")
-    except (discord.Forbidden, discord.HTTPException) as e:
-        print(f"Failed to fetch message history for transcript: {e}")
-        transcript_lines = ["[Error] Could not fetch message history"]
-    transcript = "\n".join(transcript_lines)
-
+    # Respond immediately to avoid interaction timeout
     embed = discord.Embed(
         title="🔒 Ticket Closed",
         description=f"Closed by {interaction.user.mention}",
@@ -552,8 +542,21 @@ async def close_ticket(interaction: discord.Interaction, reason: str = None):
         if data["claimer"]:
             embed.add_field(name="Claimed by", value=f"<@{data['claimer']}>", inline=True)
 
-    # Send DM to ticket opener with full details
-    if data and data.get("opener") is not None and data["opener"] not in blacklist:
+    try:
+        await interaction.response.send_message(embed=embed)
+    except discord.InteractionResponded:
+        # If already responded, send as followup
+        await interaction.followup.send(embed=embed)
+    except (discord.Forbidden, discord.HTTPException) as e:
+        print(f"Failed to send close confirmation: {e}")
+        # Try followup as last resort
+        try:
+            await interaction.followup.send(embed=embed)
+        except:
+            pass
+
+    # Send DM to ticket opener
+    if data and data.get("opener") is not None:
         opener = interaction.guild.get_member(data["opener"])
         if opener is None:
             try:
@@ -570,79 +573,18 @@ async def close_ticket(interaction: discord.Interaction, reason: str = None):
                 color=discord.Color.red(),
                 timestamp=datetime.datetime.utcnow(),
             )
-            dm_embed.add_field(name="Ticket Channel", value=channel.name, inline=True)
-            dm_embed.add_field(name="Category", value=data["category"], inline=True)
-            dm_embed.add_field(name="Closed By", value=interaction.user.mention, inline=True)
-            if data["claimer"]:
-                dm_embed.add_field(name="Claimed By", value=f"<@{data['claimer']}>", inline=True)
-            else:
-                dm_embed.add_field(name="Claimed By", value="Not claimed", inline=True)
             if reason:
                 dm_embed.add_field(name="Reason for Closure", value=reason, inline=False)
-            dm_embed.add_field(name="Closed At", value=datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"), inline=False)
-            if data["answers"]:
-                dm_embed.add_field(
-                    name="Original Details",
-                    value="\n".join(f"**{q}:** {a}" for q, a in data["answers"].items()),
-                    inline=False,
-                )
-            if transcript_lines:
-                summary_lines = transcript_lines[:10]
-                if len(transcript_lines) > 10:
-                    summary_lines.append("... (truncated)")
-                dm_embed.add_field(
-                    name="Conversation Summary",
-                    value="```\n" + "\n".join(summary_lines) + "\n```",
-                    inline=False,
-                )
             try:
                 await opener.send(embed=dm_embed)
             except discord.Forbidden:
-                pass
+                print(f"Could not DM {opener}")
 
-    # Send transcript to log channel if configured
-    if TRANSCRIPT_CHANNEL_ID and transcript_lines:
-        log_channel = interaction.guild.get_channel(TRANSCRIPT_CHANNEL_ID)
-        if log_channel:
-            try:
-                file = discord.File(
-                    fp=io.BytesIO(transcript.encode()),
-                    filename=f"transcript-{channel.name}.txt",
-                )
-                await log_channel.send(embed=embed, file=file)
-            except (discord.Forbidden, discord.HTTPException) as e:
-                print(f"Failed to send transcript to log channel: {e}")
-
-    # Send data to Kasi Vibes Studios data channel if applicable
-    if interaction.guild.id == KASI_VIBES_GUILD_ID and transcript_lines:
-        data_channel = bot.get_channel(KASI_VIBES_DATA_CHANNEL_ID)
-        if data_channel:
-            try:
-                file = discord.File(
-                    fp=io.BytesIO(transcript.encode()),
-                    filename=f"transcript-{channel.name}.txt",
-                )
-                await data_channel.send(embed=embed, file=file)
-            except (discord.Forbidden, discord.HTTPException) as e:
-                print(f"Failed to send transcript to data channel: {e}")
-
-    try:
-        await interaction.response.send_message(embed=embed)
-    except discord.InteractionResponded:
-        # If already responded, send as followup
-        await interaction.followup.send(embed=embed)
-    except (discord.Forbidden, discord.HTTPException) as e:
-        print(f"Failed to send close confirmation: {e}")
-
-    # Send ticket log if applicable
-    if not data.get("logged", False):
-        await send_ticket_log(interaction.guild, data, channel)
-        data["logged"] = True
-        save_ticket_store()
-
+    # Remove from tickets
     tickets.pop(channel.id, None)
     save_ticket_store()
     
+    # Delete the channel after a short delay
     try:
         await discord.utils.sleep_until(datetime.datetime.utcnow() + datetime.timedelta(seconds=5))
         await channel.delete(reason=f"Ticket closed by {interaction.user}")
