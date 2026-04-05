@@ -570,6 +570,8 @@ class ClosureRequestView(discord.ui.View):
 async def close_ticket(interaction: discord.Interaction, reason: str = None):
     channel = interaction.channel
     data = tickets.get(channel.id)
+    if data is None:
+        data = get_ticket_data(channel)
 
     # Generate transcript
     transcript_lines = []
@@ -705,7 +707,7 @@ async def ticket_setup(interaction: discord.Interaction):
 
 @bot.tree.command(name="closure_request", description="Request to close the current ticket")
 async def closure_request(interaction: discord.Interaction):
-    data = tickets.get(interaction.channel.id)
+    data = get_ticket_data(interaction.channel)
     if not data:
         return await interaction.response.send_message("❌ This is not a ticket channel.", ephemeral=True)
     if data["opener"] is None:
