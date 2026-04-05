@@ -4,11 +4,16 @@ from discord import app_commands
 import datetime
 import json
 import os
+import io
 
 # ─── Config ───
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 TICKET_LOG_CHANNEL_ID = None  # Set to a channel ID for ticket logs
 TRANSCRIPT_CHANNEL_ID = None  # Set to a channel ID for transcripts
+
+# Specific config for Kasi Vibes Studios server
+KASI_VIBES_GUILD_ID = 1386401415953518613
+KASI_VIBES_DATA_CHANNEL_ID = 1422680594646700073
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -344,15 +349,20 @@ async def close_ticket(interaction: discord.Interaction, reason: str = None):
         log_channel = interaction.guild.get_channel(TRANSCRIPT_CHANNEL_ID)
         if log_channel:
             file = discord.File(
-                fp=discord.utils.MISSING,
-                filename=f"transcript-{channel.name}.txt",
-            )
-            import io
-            file = discord.File(
                 fp=io.BytesIO(transcript.encode()),
                 filename=f"transcript-{channel.name}.txt",
             )
             await log_channel.send(embed=embed, file=file)
+
+    # Send data to Kasi Vibes Studios data channel if applicable
+    if interaction.guild.id == KASI_VIBES_GUILD_ID:
+        data_channel = bot.get_channel(KASI_VIBES_DATA_CHANNEL_ID)
+        if data_channel:
+            file = discord.File(
+                fp=io.BytesIO(transcript.encode()),
+                filename=f"transcript-{channel.name}.txt",
+            )
+            await data_channel.send(embed=embed, file=file)
 
     await interaction.response.send_message(embed=embed)
     tickets.pop(channel.id, None)
