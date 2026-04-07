@@ -321,7 +321,7 @@ async def send_ticket_log(guild: discord.Guild, data: dict, ticket_channel: disc
 
 
 class AnnouncementChannelSelect(discord.ui.Select):
-    def __init__(self, announcement: str, author_id: int, channels):
+    def __init__(self, announcement: str, author_id: int, channels, title: str = "📢 Announcement"):
         options = []
         for channel in channels[:25]:
             options.append(
@@ -340,6 +340,7 @@ class AnnouncementChannelSelect(discord.ui.Select):
         )
         self.announcement = announcement
         self.author_id = author_id
+        self.title = title
 
     async def callback(self, interaction: discord.Interaction):
         if interaction.user.id != self.author_id:
@@ -356,7 +357,7 @@ class AnnouncementChannelSelect(discord.ui.Select):
             )
 
         embed = discord.Embed(
-            title="📢 Announcement",
+            title=self.title,
             description=self.announcement,
             color=discord.Color.gold(),
             timestamp=datetime.datetime.utcnow(),
@@ -370,12 +371,19 @@ class AnnouncementChannelSelect(discord.ui.Select):
 
 
 class AnnouncementSelectView(discord.ui.View):
-    def __init__(self, announcement: str, author_id: int, channels):
+    def __init__(self, announcement: str, author_id: int, channels, title: str = "📢 Announcement"):
         super().__init__(timeout=120)
-        self.add_item(AnnouncementChannelSelect(announcement, author_id, channels))
+        self.add_item(AnnouncementChannelSelect(announcement, author_id, channels, title))
 
 
 class AnnouncementModal(discord.ui.Modal, title="Create Announcement"):
+    title_input = discord.ui.TextInput(
+        label="Announcement title",
+        style=discord.TextStyle.short,
+        required=False,
+        max_length=100,
+        placeholder="Leave blank for default '📢 Announcement'",
+    )
     announcement = discord.ui.TextInput(
         label="Announcement text",
         style=discord.TextStyle.paragraph,
@@ -396,9 +404,10 @@ class AnnouncementModal(discord.ui.Modal, title="Create Announcement"):
             )
 
         announcement = self.announcement.value
+        title = self.title_input.value or "📢 Announcement"
         await interaction.response.send_message(
             "Select the channel you want to post the announcement in:",
-            view=AnnouncementSelectView(announcement, interaction.user.id, channels),
+            view=AnnouncementSelectView(announcement, interaction.user.id, channels, title),
             ephemeral=True,
         )
 
@@ -601,8 +610,8 @@ async def close_ticket(interaction: discord.Interaction, reason: str = None):
 #  SLASH COMMANDS
 # ═══════════════════════════════════════════
 
-@bot.tree.command(name="announce", description="Create an announcement and pick the channel to post it in")
-@app_commands.default_permissions(manage_guild=True)
+@bot.tree.command(name="announce", description="Create an announcement with a custom title and pick the channel to post it in")
+@app_commands.default_permissions(manage_channels=True)
 async def announce(interaction: discord.Interaction):
     await interaction.response.send_modal(AnnouncementModal())
 
