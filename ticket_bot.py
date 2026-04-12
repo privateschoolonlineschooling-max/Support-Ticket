@@ -846,15 +846,85 @@ async def ticket_status(interaction: discord.Interaction, status: str):
     data["last_activity"] = datetime.datetime.utcnow().isoformat()
     save_ticket_store()
     
+    # Status emoji mapping
     status_emoji = {"open": "🟢", "pending": "🟡", "closed": "🔴"}
+    status_colors = {
+        "open": discord.Color.green(),
+        "pending": discord.Color.orange(),
+        "closed": discord.Color.red()
+    }
+    
+    # Update channel name with status indicator
+    channel = interaction.channel
+    current_name = channel.name
+    
+    # Remove old status emoji if present
+    emoji_list = list(status_emoji.values())
+    for emoji in emoji_list:
+        if current_name.startswith(emoji):
+            current_name = current_name[2:].lstrip()
+            break
+    
+    # Add new status emoji
+    new_channel_name = f"{status_emoji[status]} {current_name}" if not current_name.startswith(tuple(emoji_list)) else f"{status_emoji[status]} {current_name}"
+    
+    try:
+        await channel.edit(name=new_channel_name)
+    except discord.Forbidden:
+        pass  # Continue even if we can't rename
+    
+    # Create status update embed
     embed = discord.Embed(
         title="📝 Ticket Status Changed",
-        description=f"Status changed from **{old_status}** to **{status}**",
-        color=discord.Color.blue(),
+        description=f"Status changed from **{old_status.upper()}** to **{status.upper()}**",
+        color=status_colors.get(status, discord.Color.blue()),
+        timestamp=datetime.datetime.utcnow(),
     )
-    embed.add_field(name="Changed by", value=interaction.user.mention, inline=False)
+    embed.add_field(name="Changed by", value=interaction.user.mention, inline=True)
+    embed.add_field(name="Timestamp", value=f"<t:{int(datetime.datetime.utcnow().timestamp())}:R>", inline=True)
+    embed.add_field(name="Category", value=data.get("category", "Unknown"), inline=True)
+    embed.add_field(name="Idle", value="✅ Yes" if data.get("idle") else "❌ No", inline=True)
     
+    # Send status update in the channel
     await interaction.response.send_message(embed=embed)
+    
+    # Send DM to ticket opener notifying about status change
+    if data.get("opener"):
+        try:
+            opener = await bot.fetch_user(data["opener"])
+            user_embed = discord.Embed(
+                title=f"{status_emoji[status]} Your Ticket Status Updated",
+                description=f"Your ticket status in {interaction.guild.name} has been updated.",
+                color=status_colors.get(status, discord.Color.blue()),
+                timestamp=datetime.datetime.utcnow(),
+            )
+            user_embed.add_field(name="Previous Status", value=old_status.upper(), inline=True)
+            user_embed.add_field(name="New Status", value=status.upper(), inline=True)
+            user_embed.add_field(name="Category", value=data.get("category", "Unknown"), inline=False)
+            user_embed.add_field(name="Updated by", value=interaction.user.mention, inline=False)
+            user_embed.add_field(name="View Ticket", value=f"[Click here]({channel.jump_url})", inline=False)
+            
+            await opener.send(embed=user_embed)
+        except (discord.NotFound, discord.Forbidden):
+            pass  # Silently fail if DM can't be sent
+    
+    # If claimed, also notify the claimer
+    if data.get("claimer"):
+        try:
+            claimer = await bot.fetch_user(data["claimer"])
+            claimer_embed = discord.Embed(
+                title=f"{status_emoji[status]} Ticket Status Update",
+                description=f"A ticket you claimed has been updated.",
+                color=status_colors.get(status, discord.Color.blue()),
+                timestamp=datetime.datetime.utcnow(),
+            )
+            claimer_embed.add_field(name="Previous Status", value=old_status.upper(), inline=True)
+            claimer_embed.add_field(name="New Status", value=status.upper(), inline=True)
+            claimer_embed.add_field(name="Updated by", value=interaction.user.mention, inline=False)
+            
+            await claimer.send(embed=claimer_embed)
+        except (discord.NotFound, discord.Forbidden):
+            pass  # Silently fail if DM can't be sent
 
 
 @bot.tree.command(name="idle", description="Mark the current ticket as inactive")
@@ -875,8 +945,53 @@ async def mark_idle(interaction: discord.Interaction):
     )
     embed.add_field(name="Marked by", value=interaction.user.mention, inline=False)
     embed.add_field(name="Time", value=f"<t:{int(datetime.datetime.utcnow().timestamp())}:R>", inline=False)
+    embed.add_field(name="Tip", value="Use `/active` to revert this status.", inline=False)
     
     await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="active", description="Mark the current idle ticket as active")
+@app_commands.default_permissions(manage_channels=True)
+async def mark_active(interaction: discord.Interaction):
+    data = get_ticket_data(interaction.channel)
+    if not data:
+        return await interaction.response.send_message("❌ This is not a ticket channel.", ephemeral=True)
+    
+    if not data.get("idle"):
+        return await interaction.response.send_message(
+            "ℹ️ This ticket is not marked as idle.",
+            ephemeral=True
+        )
+    
+    data["idle"] = False
+    data["last_activity"] = datetime.datetime.utcnow().isoformat()
+    save_ticket_store()
+    
+    embed = discord.Embed(
+        title="✅ Ticket Marked as Active",
+        description="This ticket is now marked as active and requires attention.",
+        color=discord.Color.green(),
+    )
+    embed.add_field(name="Marked by", value=interaction.user.mention, inline=False)
+    embed.add_field(name="Time", value=f"<t:{int(datetime.datetime.utcnow().timestamp())}:R>", inline=False)
+    
+    # Notify the ticket opener if available
+    if data.get("opener"):
+        try:
+            opener = await bot.fetch_user(data["opener"])
+            user_embed = discord.Embed(
+                title="✅ Your Ticket is Now Active",
+                description=f"Your ticket in {interaction.guild.name} has been marked as active again.",
+                color=discord.Color.green(),
+            )
+            user_embed.add_field(name="Category", value=data["category"], inline=False)
+            user_embed.add_field(name="Activated by", value=interaction.user.mention, inline=False)
+            await opener.send(embed=user_embed)
+        except (discord.NotFound, discord.Forbidden):
+            pass
+    
+    await interaction.response.send_message(embed=embed)
+
 
 
 @bot.tree.command(name="remind", description="Send a reminder about ticket inactivity to staff or user")
@@ -910,6 +1025,35 @@ async def remind_ticket(interaction: discord.Interaction, target: str):
     }
     
     if target == "staff":
+        # Send DM to staff members AND ping them in the ticket
+        staff_members = []
+        staff_mentions = []
+        for member in interaction.guild.members:
+            if member.guild_permissions.manage_channels and not member.bot:
+                staff_members.append(member)
+                staff_mentions.append(member.mention)
+        
+        # Send DM notifications to staff
+        dm_embed = discord.Embed(
+            title="🔔 Staff Reminder - Ticket Needs Attention",
+            description=f"An inactive ticket has been flagged and requires your attention.",
+            color=discord.Color.orange(),
+        )
+        dm_embed.add_field(name="Category", value=data['category'], inline=True)
+        dm_embed.add_field(name="Opened by", value=f"<@{data['opener']}>", inline=True)
+        dm_embed.add_field(name="Last Activity", value=f"<t:{int(datetime.datetime.fromisoformat(data['last_activity']).timestamp())}:R>", inline=False)
+        dm_embed.add_field(name="Ticket Channel", value=f"[View in {interaction.guild.name}]({channel.jump_url})", inline=False)
+        dm_embed.add_field(name="Reminder requested by", value=interaction.user.mention, inline=False)
+        
+        # DM each staff member
+        dm_count = 0
+        for staff_member in staff_members:
+            try:
+                await staff_member.send(embed=dm_embed)
+                dm_count += 1
+            except discord.Forbidden:
+                pass
+        
         # Ping staff in the ticket
         embed = discord.Embed(
             title="🔔 Staff Reminder",
@@ -920,14 +1064,14 @@ async def remind_ticket(interaction: discord.Interaction, target: str):
         embed.add_field(name="Last Activity", value=f"<t:{int(datetime.datetime.fromisoformat(data['last_activity']).timestamp())}:R>", inline=False)
         embed.add_field(name="Reminder sent by", value=interaction.user.mention, inline=False)
         
-        # Mention users with manage_channels permission (staff)
-        staff_mentions = []
-        for member in interaction.guild.members:
-            if member.guild_permissions.manage_channels and not member.bot:
-                staff_mentions.append(member.mention)
-        
         message_content = " ".join(staff_mentions[:5]) if staff_mentions else "Staff"
         await channel.send(f"{message_content}", embed=embed)
+        
+        # Respond to the command user
+        await interaction.response.send_message(
+            f"✅ Reminder sent! DMs sent to {dm_count} staff member(s) and notification posted in channel.",
+            ephemeral=True
+        )
         
     else:  # user
         # Send DM to ticket opener
@@ -941,7 +1085,23 @@ async def remind_ticket(interaction: discord.Interaction, target: str):
                 )
                 embed.add_field(name="Category", value=data["category"], inline=False)
                 embed.add_field(name="Channel", value=f"[View Ticket]({channel.jump_url})", inline=False)
+                embed.add_field(name="Status", value=data.get("status", "open").upper(), inline=True)
+                
+                # Add note if ticket is idle
+                if data.get("idle"):
+                    embed.add_field(name="⚠️ Note", value="This ticket is currently marked as idle.", inline=False)
+                
                 await opener.send(embed=embed)
+                
+                # Also send notification in the ticket channel
+                user_reminder_embed = discord.Embed(
+                    title="📨 Reminder Sent to User",
+                    description=f"A reminder has been sent to <@{data['opener']}>",
+                    color=discord.Color.blue(),
+                )
+                user_reminder_embed.add_field(name="Sent by", value=interaction.user.mention, inline=False)
+                await channel.send(embed=user_reminder_embed)
+                
                 await interaction.response.send_message(
                     f"✅ Reminder sent to <@{data['opener']}>",
                     ephemeral=True
