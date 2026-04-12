@@ -1,5 +1,5 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 import datetime
 import json
@@ -21,14 +21,25 @@ intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ─── In-memory ticket store ───
-# ticket_channel_id -> { "opener": user_id, "claimer": user_id|None, "category": str, "answers": dict }
+# ticket_channel_id -> { "opener": user_id, "claimer": user_id|None, "category": str, "answers": dict,
+#                        "status": "open|pending|closed", "created_at": str, "last_activity": str, 
+#                        "idle": bool, "auto_close_time": int|None, "logged": bool }
 tickets = {}
 TICKET_STORE_FILE = os.path.join(os.path.dirname(__file__), "tickets.json")
+
+# ─── Ticket history store ───
+# user_id -> [{ "ticket_id": int, "category": str, "created_at": str, "closed_at": str, "feedback_rating": int|None }]
+ticket_history = {}
+HISTORY_STORE_FILE = os.path.join(os.path.dirname(__file__), "ticket_history.json")
 
 # ─── Blacklist store ───
 # user_id -> { "blacklisted_by": user_id, "reason": str, "timestamp": str }
 blacklist = {}
 BLACKLIST_STORE_FILE = os.path.join(os.path.dirname(__file__), "blacklist.json")
+
+# ─── Pending reminders ───
+# ticket_channel_id -> { "reminded_at": str, "type": "staff|user" }
+reminders = {}
 
 
 def save_ticket_store() -> None:
@@ -47,6 +58,26 @@ def load_ticket_store() -> None:
             data = json.load(f)
             for key, value in data.items():
                 tickets[int(key)] = value
+    except (OSError, json.JSONDecodeError):
+        pass
+
+
+def save_history_store() -> None:
+    try:
+        with open(HISTORY_STORE_FILE, "w", encoding="utf-8") as f:
+            json.dump({str(k): v for k, v in ticket_history.items()}, f, indent=2)
+    except OSError:
+        pass
+
+
+def load_history_store() -> None:
+    if not os.path.exists(HISTORY_STORE_FILE):
+        return
+    try:
+        with open(HISTORY_STORE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            for key, value in data.items():
+                ticket_history[int(key)] = value
     except (OSError, json.JSONDecodeError):
         pass
 
@@ -92,12 +123,17 @@ def get_ticket_data(channel: discord.TextChannel):
             except json.JSONDecodeError:
                 pass
 
+        current_time = datetime.datetime.utcnow().isoformat()
         data = {
             "opener": opener,
             "claimer": claimer,
             "category": category,
             "answers": {},
-            "created_at": datetime.datetime.utcnow().isoformat(),
+            "status": "open",
+            "created_at": current_time,
+            "last_activity": current_time,
+            "idle": False,
+            "auto_close_time": None,
             "logged": True,
         }
         tickets[channel.id] = data
@@ -253,12 +289,17 @@ async def create_ticket_channel(interaction: discord.Interaction, category: str,
         ticket_name, category=category_channel, overwrites=overwrites
     )
 
+    current_time = datetime.datetime.utcnow().isoformat()
     tickets[channel.id] = {
         "opener": user.id,
         "claimer": None,
         "category": category,
         "answers": answers,
-        "created_at": datetime.datetime.utcnow().isoformat(),
+        "status": "open",
+        "created_at": current_time,
+        "last_activity": current_time,
+        "idle": False,
+        "auto_close_time": None,
         "logged": False,
     }
     save_ticket_store()
@@ -479,6 +520,49 @@ class CloseReasonModal(discord.ui.Modal, title="Close Ticket"):
 
 
 # ═══════════════════════════════════════════
+#  FEEDBACK MODAL
+# ═══════════════════════════════════════════
+
+class FeedbackModal(discord.ui.Modal, title="Rate Your Support Experience"):
+    rating = discord.ui.TextInput(
+        label="Rating (1-5 stars)",
+        placeholder="Enter a number from 1 to 5",
+        style=discord.TextStyle.short,
+        required=True,
+        min_length=1,
+        max_length=1
+    )
+    comments = discord.ui.TextInput(
+        label="Additional comments (optional)",
+        style=discord.TextStyle.paragraph,
+        required=False,
+        max_length=500
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            rating = int(self.rating.value)
+            if rating < 1 or rating > 5:
+                await interaction.response.send_message("❌ Rating must be between 1 and 5.", ephemeral=True)
+                return
+        except ValueError:
+            await interaction.response.send_message("❌ Rating must be a number.", ephemeral=True)
+            return
+        
+        # Store feedback - this would be in the ticket history
+        embed = discord.Embed(
+            title="✅ Feedback Submitted",
+            description=f"Thank you for rating your support experience!",
+            color=discord.Color.green(),
+        )
+        embed.add_field(name="Rating", value=f"⭐ {rating}/5", inline=True)
+        if self.comments.value:
+            embed.add_field(name="Comments", value=self.comments.value, inline=False)
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+# ═══════════════════════════════════════════
 #  CLOSURE REQUEST (/closure_request)
 # ═══════════════════════════════════════════
 
@@ -546,6 +630,7 @@ async def close_ticket(interaction: discord.Interaction, reason: str = None):
         embed.add_field(name="Reason", value=reason, inline=False)
     if data:
         embed.add_field(name="Category", value=data["category"], inline=True)
+        embed.add_field(name="Status", value=data.get("status", "open"), inline=True)
         if data.get("opener") is not None:
             embed.add_field(name="Opened by", value=f"<@{data['opener']}>", inline=True)
         if data["claimer"]:
@@ -564,7 +649,7 @@ async def close_ticket(interaction: discord.Interaction, reason: str = None):
         except:
             pass
 
-    # Send DM to ticket opener
+    # Send DM to ticket opener with feedback request
     if data and data.get("opener") is not None:
         opener = interaction.guild.get_member(data["opener"])
         if opener is None:
@@ -575,7 +660,7 @@ async def close_ticket(interaction: discord.Interaction, reason: str = None):
 
         if opener:
             dm_embed = discord.Embed(
-                title=f"🔒 Your {data['category']} Ticket Has Been Closed",
+                title=f"🔒 Your {data.get('category', 'Support')} Ticket Has Been Closed",
                 description=(
                     f"Your ticket in {interaction.guild.name} has been closed by {interaction.user.mention}."
                 ),
@@ -584,13 +669,37 @@ async def close_ticket(interaction: discord.Interaction, reason: str = None):
             )
             if reason:
                 dm_embed.add_field(name="Reason for Closure", value=reason, inline=False)
+            
+            dm_embed.add_field(
+                name="📋 Feedback",
+                value="Please use `/feedback` to rate your support experience.",
+                inline=False
+            )
+            
             try:
                 await opener.send(embed=dm_embed)
             except discord.Forbidden:
                 print(f"Could not DM {opener}")
+        
+        # Add to ticket history
+        if opener:
+            closed_time = datetime.datetime.utcnow().isoformat()
+            if opener.id not in ticket_history:
+                ticket_history[opener.id] = []
+            
+            ticket_history[opener.id].append({
+                "ticket_id": channel.id,
+                "category": data.get("category", "Unknown"),
+                "created_at": data.get("created_at", closed_time),
+                "closed_at": closed_time,
+                "feedback_rating": None,
+                "status": "closed"
+            })
+            save_history_store()
 
-    # Remove from tickets
+    # Remove from tickets and reminders
     tickets.pop(channel.id, None)
+    reminders.pop(channel.id, None)
     save_ticket_store()
     
     # Delete the channel after a short delay
@@ -714,6 +823,224 @@ async def ticket_stats(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
+@bot.tree.command(name="status", description="Change the status of the current ticket")
+@app_commands.describe(status="Select ticket status: open, pending, or closed")
+@app_commands.choices(
+    status=[
+        app_commands.Choice(name="Open", value="open"),
+        app_commands.Choice(name="Pending", value="pending"),
+        app_commands.Choice(name="Closed", value="closed"),
+    ]
+)
+@app_commands.default_permissions(manage_channels=True)
+async def ticket_status(interaction: discord.Interaction, status: str):
+    data = get_ticket_data(interaction.channel)
+    if not data:
+        return await interaction.response.send_message("❌ This is not a ticket channel.", ephemeral=True)
+    
+    if status not in ["open", "pending", "closed"]:
+        return await interaction.response.send_message("❌ Invalid status. Use: open, pending, or closed.", ephemeral=True)
+    
+    old_status = data.get("status", "open")
+    data["status"] = status
+    data["last_activity"] = datetime.datetime.utcnow().isoformat()
+    save_ticket_store()
+    
+    status_emoji = {"open": "🟢", "pending": "🟡", "closed": "🔴"}
+    embed = discord.Embed(
+        title="📝 Ticket Status Changed",
+        description=f"Status changed from **{old_status}** to **{status}**",
+        color=discord.Color.blue(),
+    )
+    embed.add_field(name="Changed by", value=interaction.user.mention, inline=False)
+    
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="idle", description="Mark the current ticket as inactive")
+@app_commands.default_permissions(manage_channels=True)
+async def mark_idle(interaction: discord.Interaction):
+    data = get_ticket_data(interaction.channel)
+    if not data:
+        return await interaction.response.send_message("❌ This is not a ticket channel.", ephemeral=True)
+    
+    data["idle"] = True
+    data["last_activity"] = datetime.datetime.utcnow().isoformat()
+    save_ticket_store()
+    
+    embed = discord.Embed(
+        title="😴 Ticket Marked as Inactive",
+        description="This ticket is now marked as idle and waiting for staff action.",
+        color=discord.Color.greyple(),
+    )
+    embed.add_field(name="Marked by", value=interaction.user.mention, inline=False)
+    embed.add_field(name="Time", value=f"<t:{int(datetime.datetime.utcnow().timestamp())}:R>", inline=False)
+    
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="remind", description="Send a reminder about ticket inactivity to staff or user")
+@app_commands.describe(target="Choose who to remind: staff or user")
+@app_commands.choices(
+    target=[
+        app_commands.Choice(name="Staff", value="staff"),
+        app_commands.Choice(name="User", value="user"),
+    ]
+)
+@app_commands.default_permissions(manage_channels=True)
+async def remind_ticket(interaction: discord.Interaction, target: str):
+    data = get_ticket_data(interaction.channel)
+    if not data:
+        return await interaction.response.send_message("❌ This is not a ticket channel.", ephemeral=True)
+    
+    channel = interaction.channel
+    
+    # Check if already reminded recently
+    if channel.id in reminders:
+        last_remind = datetime.datetime.fromisoformat(reminders[channel.id]["reminded_at"])
+        if (datetime.datetime.utcnow() - last_remind).total_seconds() < 300:  # 5 minutes cooldown
+            return await interaction.response.send_message(
+                "⏰ This ticket was just reminded. Please wait 5 minutes before reminding again.",
+                ephemeral=True
+            )
+    
+    reminders[channel.id] = {
+        "reminded_at": datetime.datetime.utcnow().isoformat(),
+        "type": target
+    }
+    
+    if target == "staff":
+        # Ping staff in the ticket
+        embed = discord.Embed(
+            title="🔔 Staff Reminder",
+            description="This ticket has been inactive and needs staff attention!",
+            color=discord.Color.orange(),
+        )
+        embed.add_field(name="Ticket", value=f"{data['category']} - Opened by <@{data['opener']}>", inline=False)
+        embed.add_field(name="Last Activity", value=f"<t:{int(datetime.datetime.fromisoformat(data['last_activity']).timestamp())}:R>", inline=False)
+        embed.add_field(name="Reminder sent by", value=interaction.user.mention, inline=False)
+        
+        # Mention users with manage_channels permission (staff)
+        staff_mentions = []
+        for member in interaction.guild.members:
+            if member.guild_permissions.manage_channels and not member.bot:
+                staff_mentions.append(member.mention)
+        
+        message_content = " ".join(staff_mentions[:5]) if staff_mentions else "Staff"
+        await channel.send(f"{message_content}", embed=embed)
+        
+    else:  # user
+        # Send DM to ticket opener
+        if data.get("opener"):
+            try:
+                opener = await bot.fetch_user(data["opener"])
+                embed = discord.Embed(
+                    title="🔔 Ticket Reminder",
+                    description=f"Your ticket in {interaction.guild.name} is awaiting your response.",
+                    color=discord.Color.orange(),
+                )
+                embed.add_field(name="Category", value=data["category"], inline=False)
+                embed.add_field(name="Channel", value=f"[View Ticket]({channel.jump_url})", inline=False)
+                await opener.send(embed=embed)
+                await interaction.response.send_message(
+                    f"✅ Reminder sent to <@{data['opener']}>",
+                    ephemeral=True
+                )
+            except (discord.NotFound, discord.Forbidden):
+                await interaction.response.send_message(
+                    "❌ Could not send reminder to user. They may have DMs disabled.",
+                    ephemeral=True
+                )
+        else:
+            await interaction.response.send_message(
+                "❌ Could not find ticket opener.",
+                ephemeral=True
+            )
+
+
+@bot.tree.command(name="auto-close", description="Set ticket to auto-close after specified time")
+@app_commands.describe(
+    time_value="Number of minutes or hours",
+    unit="Time unit: minutes or hours"
+)
+@app_commands.choices(
+    unit=[
+        app_commands.Choice(name="Minutes", value="minutes"),
+        app_commands.Choice(name="Hours", value="hours"),
+    ]
+)
+@app_commands.default_permissions(manage_channels=True)
+async def auto_close_ticket(interaction: discord.Interaction, time_value: int, unit: str):
+    data = get_ticket_data(interaction.channel)
+    if not data:
+        return await interaction.response.send_message("❌ This is not a ticket channel.", ephemeral=True)
+    
+    if time_value <= 0:
+        return await interaction.response.send_message("❌ Time value must be greater than 0.", ephemeral=True)
+    
+    # Convert to minutes
+    multiplier = 60 if unit == "hours" else 1
+    close_in_minutes = time_value * multiplier
+    close_in_seconds = close_in_minutes * 60
+    
+    data["auto_close_time"] = int(datetime.datetime.utcnow().timestamp()) + close_in_seconds
+    data["last_activity"] = datetime.datetime.utcnow().isoformat()
+    save_ticket_store()
+    
+    embed = discord.Embed(
+        title="⏱️ Auto-Close Scheduled",
+        description=f"This ticket will automatically close in **{time_value} {unit}**",
+        color=discord.Color.blue(),
+    )
+    embed.add_field(name="Close Time", value=f"<t:{data['auto_close_time']}:R>", inline=False)
+    embed.add_field(name="Set by", value=interaction.user.mention, inline=False)
+    
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="feedback", description="Rate your support experience")
+async def give_feedback(interaction: discord.Interaction):
+    # Check if user has any closed tickets
+    if interaction.user.id not in ticket_history or not ticket_history[interaction.user.id]:
+        await interaction.response.send_message(
+            "ℹ️ You don't have any closed tickets to rate yet.",
+            ephemeral=True
+        )
+        return
+    
+    await interaction.response.send_modal(FeedbackModal())
+
+
+@bot.tree.command(name="history", description="View ticket history for a user")
+@app_commands.describe(user="The user to view history for")
+@app_commands.default_permissions(manage_channels=True)
+async def view_history(interaction: discord.Interaction, user: discord.Member):
+    if user.id not in ticket_history or not ticket_history[user.id]:
+        return await interaction.response.send_message(
+            f"ℹ️ {user.mention} has no ticket history.",
+            ephemeral=True
+        )
+    
+    history = ticket_history[user.id]
+    embed = discord.Embed(
+        title=f"📋 Ticket History for {user.name}",
+        description=f"Total tickets: {len(history)}",
+        color=discord.Color.blurple(),
+    )
+    
+    for i, ticket in enumerate(history[-10:], 1):  # Show last 10 tickets
+        status = ticket.get("status", "unknown")
+        category = ticket.get("category", "Unknown")
+        created = ticket.get("created_at", "Unknown")[:10]
+        rating = ticket.get("feedback_rating", "N/A")
+        
+        field_value = f"**Category:** {category}\n**Created:** {created}\n**Status:** {status}\n**Rating:** {rating}"
+        embed.add_field(name=f"Ticket #{ticket['ticket_id']}", value=field_value, inline=False)
+    
+    embed.set_footer(text=f"Requested by {interaction.user}")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 @bot.tree.command(name="blacklist", description="Blacklist a user from opening tickets and disable DM notifications")
 @app_commands.describe(user="The user to blacklist", reason="Reason for blacklisting")
 @app_commands.default_permissions(manage_channels=True)
@@ -791,6 +1118,7 @@ async def blacklist_list(interaction: discord.Interaction):
 async def on_ready():
     bot.add_view(TicketSetupView())
     bot.add_view(TicketControlView())
+    auto_close_loop.start()
     try:
         synced = await bot.tree.sync()
         print(f"✅ Synced {len(synced)} commands")
@@ -800,11 +1128,81 @@ async def on_ready():
 
 
 # ═══════════════════════════════════════════
+#  BACKGROUND TASKS
+# ═══════════════════════════════════════════
+
+@tasks.loop(minutes=1)
+async def auto_close_loop():
+    """Check for tickets that need auto-closing"""
+    current_time = int(datetime.datetime.utcnow().timestamp())
+    
+    for channel_id, data in list(tickets.items()):
+        auto_close_time = data.get("auto_close_time")
+        
+        if auto_close_time and current_time >= auto_close_time:
+            # Find the channel and close it
+            guild = None
+            for g in bot.guilds:
+                channel = g.get_channel(channel_id)
+                if channel:
+                    guild = g
+                    break
+            
+            if guild and channel:
+                try:
+                    # Create a pseudo-interaction to call close_ticket
+                    class PseudoInteraction:
+                        def __init__(self, ch, usr):
+                            self.channel = ch
+                            self.user = usr
+                            self.guild = ch.guild
+                            self.responded = False
+                        
+                        async def response_send_message(self, **kwargs):
+                            await self.channel.send(**kwargs)
+                        
+                        @property
+                        def response(self):
+                            return self
+                        
+                        async def send_message(self, *args, **kwargs):
+                            await self.channel.send(*args, **kwargs)
+                        
+                        async def followup_send(self, *args, **kwargs):
+                            await self.channel.send(*args, **kwargs)
+                        
+                        @property
+                        def followup(self):
+                            return self
+                    
+                    bot_user = guild.get_member(bot.user.id)
+                    pseudo = PseudoInteraction(channel, bot_user)
+                    
+                    # Send notification first
+                    embed = discord.Embed(
+                        title="⏰ Auto-Close Executed",
+                        description="This ticket will be closed automatically.",
+                        color=discord.Color.red(),
+                    )
+                    await channel.send(embed=embed)
+                    
+                    # Wait a moment then delete
+                    await discord.utils.sleep_until(datetime.datetime.utcnow() + datetime.timedelta(seconds=3))
+                    await channel.delete(reason="Auto-close timer completed")
+                    tickets.pop(channel_id, None)
+                    save_ticket_store()
+                    
+                except Exception as e:
+                    print(f"Error auto-closing ticket {channel_id}: {e}")
+
+
+# ═══════════════════════════════════════════
 #  RUN
 # ═══════════════════════════════════════════
 
 if __name__ == "__main__":
     load_ticket_store()
+    load_history_store()
     load_blacklist_store()
     if not TOKEN:
         print("❌ Error: DISCORD_BOT_TOKEN environment variable not set!")
